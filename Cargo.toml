@@ -1,0 +1,8 @@
+[package]
+name = "falling_sand"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+enum-iterator = "2.3.0"
+macroquad = "0.4.14"
