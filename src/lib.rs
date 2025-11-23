@@ -4,6 +4,13 @@ use macroquad::{
     rand::ChooseRandom
 };
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum State {
+    Solid,
+    Liquid,
+    Gas,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Sequence)]
 /// flowing directions for liquids
 pub enum FlowDir {
@@ -19,6 +26,7 @@ pub enum Block {
     Stone,
     Sand,
     Water(FlowDir),
+    Lava(FlowDir),
 }
 
 impl Block {
@@ -27,14 +35,40 @@ impl Block {
         return matches!(self, Block::Air | Block::Stone);
     }
 
-    /// returns if this block is solid
-    fn is_solid(&self) -> bool {
-        return matches!(self, Block::Stone | Block::Sand);
-    }
-
     /// returns if moving into the other block is a valid operation
     fn can_move_to(&self, other: Self) -> bool {
-        !other.is_solid() && other != *self && (!matches!(*self, Block::Water(_)) || !matches!(other, Block::Water(_)))
+        // !other.is_solid() && other != *self && (!matches!(*self, Block::Water(_)) || !matches!(other, Block::Water(_)))
+        self.density() > other.density()
+    }
+
+    /// returns the density of the block, can be negative
+    fn density(&self) -> i32 {
+        match self {
+            Self::Air => 0,
+            Self::Water(_) => 1,
+            Self::Lava(_) => 2,
+            Self::Sand => 3,
+            Self::Stone => 100,
+        }
+    }
+
+    /// returs which state of matter the block is
+    fn state(&self) -> State {
+        match self {
+            Self::Air => State::Gas,
+            Self::Water(_) => State::Liquid,
+            Self::Lava(_) => State::Liquid,
+            Self::Sand => State::Solid,
+            Self::Stone => State::Solid,
+        }
+    }
+
+    /// returns the flow direction of the liquid
+    fn get_flow_dir(&self) -> FlowDir {
+        match self {
+            Block::Water(flow_dir) | Block::Lava(flow_dir) => *flow_dir,
+            _ => FlowDir::None
+        }
     }
 
     // returns the color of the block
@@ -49,7 +83,19 @@ impl Block {
             Block::Water(_) => {
                 BLUE
             }
+            Self::Lava(_) => {
+                RED
+            }
             _ => unimplemented!("Block Type: {self:?} does not have a color")
+        }
+    }
+
+    /// creates a copy of the liquid with a different flow direction
+    fn clone_with_flow(&self, flowing: FlowDir) -> Block {
+        match self {
+            Block::Water(_) => Block::Water(flowing),
+            Block::Lava(_) => Block::Lava(flowing),
+            _ => unreachable!()
         }
     }
 }
@@ -85,11 +131,13 @@ impl World {
                     continue;
                 }
 
-                match block {
-                    Block::Sand => {
+                match block.state() {
+                    State::Solid => {
                         self.apply_gravity(x, y);
                     }
-                    Block::Water(flow_dir) => {
+                    State::Liquid => {
+                        let flow_dir = block.get_flow_dir();
+
                         // Move Side-to-Side if the water didn't flow downwards
                         if !self.apply_gravity(x, y) {
                             let mut positions = Vec::new();
@@ -116,7 +164,7 @@ impl World {
                                 };
 
                                 self.blocks[y][x] = self.blocks[y][position];
-                                self.blocks[y][position] = Block::Water(flowing);
+                                self.blocks[y][position] = block.clone_with_flow(flowing);
 
                                 updated.push((position, y));
                             }
@@ -130,39 +178,60 @@ impl World {
 
     /// applies gravity to the specified position and returns if the block there fell
     fn apply_gravity(&mut self, x: usize, y: usize) -> bool {
+        // dont bother checking if on floor
+        if y >= self.height-1 {
+            return false
+        }
+
         let mut fell = false;
         let block = self.blocks[y][x];
-        // dont bother checking if on floor
-        if y < self.height - 1 {
-            let below = y + 1;
 
-            if block.can_move_to(self.blocks[below][x]) {
-                // Fall straight
-                self.blocks[y][x] = self.blocks[below][x];
-                self.blocks[below][x] = block;
+        let below = y + 1;
+
+        if self.can_fall_to((x, y), (x, below)) {
+            // Fall straight
+            self.blocks[y][x] = self.blocks[below][x];
+            self.blocks[below][x] = block;
+
+            fell = true;
+        } else {
+            // Fall to the side
+            let mut positions = Vec::new();
+
+            if x > 0 && self.can_fall_to((x, y), (x-1, below)) {
+                positions.push(x-1);
+            }
+            if x < self.width-1 && self.can_fall_to((x, y), (x+1, below)) {
+                positions.push(x+1);
+            }
+
+            if let Some(&position) = positions.choose() {
+                self.blocks[y][x] = self.blocks[below][position];
+                self.blocks[below][position] = block;
 
                 fell = true;
-            } else {
-                // Fall to the side
-                let mut positions = Vec::new();
-
-                if x > 0 && block.can_move_to(self.blocks[below][x-1]) && !self.blocks[y][x-1].is_solid() {
-                    positions.push(x-1);
-                }
-                if x < self.width-1 && block.can_move_to(self.blocks[below][x+1]) && !self.blocks[y][x+1].is_solid() {
-                    positions.push(x+1);
-                }
-
-                if let Some(&position) = positions.choose() {
-                    self.blocks[y][x] = self.blocks[below][position];
-                    self.blocks[below][position] = block;
-
-                    fell = true;
-                }
             }
         }
 
         return fell;
+    }
+
+    /// returns if the block at the given position
+    /// can fall into the target position due to gravity
+    fn can_fall_to(&self, from: (usize, usize), to: (usize, usize)) -> bool {
+        if to.0 >= self.width || to.1 >= self.height {
+            return false
+        }
+
+        let from_block = self.blocks[from.1][from.0];
+        let to_block = self.blocks[to.1][to.0];
+
+        if to.0 != from.0 {
+            let above_to = self.blocks[from.1][to.0];
+            return from_block.can_move_to(to_block) && from_block.can_move_to(above_to);
+        } else {
+            return from_block.can_move_to(to_block);
+        }
     }
 
     /// returns the block at the given position
